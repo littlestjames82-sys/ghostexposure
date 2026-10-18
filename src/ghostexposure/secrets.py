@@ -59,15 +59,29 @@ _PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/=]{16,}")
 REDACTED = "***REDACTED***"
 
 
+def _is_pem_body_line(line):
+    """True for lines that can appear inside a PEM block between the
+    BEGIN and END lines: blank lines, bare base64, and old-style PEM
+    header lines (``Name: value``). Ordinary code lines are not."""
+    s = line.strip()
+    return (not s or _PEM_BODY_RE.fullmatch(s) is not None
+            or (":" in s and not s.startswith("-----")))
+
+
 def _pem_block_last_line(lines, start):
     """0-based index of the last line of the PEM block whose BEGIN
     header is on lines[start]: through the END line when present, else
     over the following bare-base64 body lines (a file can be cut before
     its END line; the body is the secret material either way). Mirrors
-    GhostSlice's _pem_block."""
+    GhostSlice's _pem_block, with one hardening difference: an END line
+    only closes the block when every line in between is PEM-shaped. A
+    truncated block followed by ordinary code and an unrelated END line
+    later in the file must not swallow the code in between."""
     for j in range(start + 1, len(lines)):
         if _PEM_END_RE.search(lines[j]):
             return j
+        if not _is_pem_body_line(lines[j]):
+            break
     last = start
     for j in range(start + 1, len(lines)):
         if _PEM_BODY_RE.fullmatch(lines[j].strip()):
@@ -78,15 +92,34 @@ def _pem_block_last_line(lines, start):
 
 
 def find_literals(text):
-    """Return list of (line_no, type_id, start, end) for literal spans."""
+    """Find secret-shaped literal spans in ``text``.
+
+    Returns a list of dicts with ``line`` (1-based), ``type`` (the
+    shape id), ``start``, and ``end`` (character offsets into
+    ``text``), sorted by ``start`` and de-duplicated by span. A
+    private-key header finding spans its whole key block, and findings
+    inside an already-recorded block are not repeated. The literal
+    values themselves are only ever addressed by span here; callers
+    record path, line, and type, never the value.
+    """
     found = []
     seen = set()
-    lines = text.splitlines()
+    # Split keeping the terminators so line start offsets are exact for
+    # CRLF (and CR / LF) files. Assuming a 1-char terminator drifts the
+    # offset by one per preceding CRLF line, which shifted redaction
+    # spans off the literal and left its tail in the exported copy.
+    lines = []
     line_starts = []
     offset = 0
-    for line in lines:
+    for segment in text.splitlines(keepends=True):
         line_starts.append(offset)
-        offset += len(line) + 1
+        offset += len(segment)
+        if segment.endswith("\r\n"):
+            lines.append(segment[:-2])
+        elif segment and segment[-1] in "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029":
+            lines.append(segment[:-1])
+        else:
+            lines.append(segment)
     block_spans = []
 
     def add(lineno, type_id, span):
@@ -123,12 +156,39 @@ def find_literals(text):
             for m in _BARE_40.finditer(line):
                 add(lineno, "aws_secret_key",
                     (base + m.start(), base + m.end()))
-    return sorted(found, key=lambda f: f["start"])
+    # Drop findings fully contained in a wider finding (for example a
+    # password-in-URL span inside a generic-assignment span covering the
+    # whole value): the wider span already covers the literal, and
+    # recording or redacting both corrupts the offsets (see redact_text).
+    kept = []
+    for f in sorted(found, key=lambda x: (x["start"],
+                                          -(x["end"] - x["start"]))):
+        if any(k["start"] <= f["start"] and f["end"] <= k["end"]
+               for k in kept):
+            continue
+        kept.append(f)
+    return sorted(kept, key=lambda f: f["start"])
 
 
 def redact_text(text, findings):
-    """Replace each finding span with the redaction marker."""
+    """Return ``text`` with each finding span replaced by ``REDACTED``.
+
+    ``findings`` is a list as returned by :func:`find_literals`.
+    Overlapping spans are merged first: replacing a nested or partially
+    overlapping span changes the text length, which invalidates the
+    other span's offsets and can leave part of a literal behind. The
+    merged spans are applied from the end of the text backwards so
+    earlier offsets stay valid. Only the copy passed in is affected;
+    the caller decides where (or whether) the result is written.
+    """
+    spans = sorted((f["start"], f["end"]) for f in findings)
+    merged = []
+    for s, e in spans:
+        if merged and s < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
     out = text
-    for f in sorted(findings, key=lambda x: x["start"], reverse=True):
-        out = out[:f["start"]] + REDACTED + out[f["end"]:]
+    for s, e in reversed(merged):
+        out = out[:s] + REDACTED + out[e:]
     return out

@@ -3,7 +3,16 @@
 Evidence only. This package partitions a project tree against a readable
 surface pack, exports the surface plus its direct context, and verifies a
 bundle against its manifest. It records evidence only: contents,
-decisions, reasons, and hashes.
+decisions, reasons, and hashes. It issues no verdict about the code in
+a bundle and makes no network calls.
+
+Public constants:
+    COVERAGE_STATEMENT: the coverage-limits wording written into every
+        scan report, export, and verification. Its presence in a bundle
+        is checked by ``verify``; do not reword it casually.
+    CANNOT_PROVE_STATEMENT: the wording that states what verification
+        cannot prove. Printed by every ``verify`` run and written into
+        every ``EXPOSURE.md``.
 """
 __version__ = "0.1.0"
 

@@ -75,6 +75,12 @@ if _gs_estimate is not None:
     METHOD = _gs_method
 
     def estimate_tokens(text, path=None) -> int:
+        """Estimate tokens in ``text`` with GhostSlice's estimator.
+
+        ``path`` selects the per-file language when given. Empty or
+        missing text estimates to 0. The result is an estimate, not a
+        measured count.
+        """
         if not text:
             return 0
         language = language_for(path) if path else None
@@ -83,6 +89,12 @@ else:
     METHOD = "ghostexposure-estimate-v1: ceil(len(text)/4), estimates only"
 
     def estimate_tokens(text, path=None) -> int:
+        """Estimate tokens in ``text`` as ``ceil(len(text) / 4)``.
+
+        Fallback used only when GhostSlice is not reachable; ``path``
+        is accepted for signature compatibility and does not change
+        the estimate. Empty or missing text estimates to 0.
+        """
         if not text:
             return 0
         return int(math.ceil(len(text) / 4))
